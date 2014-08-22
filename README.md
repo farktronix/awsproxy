@@ -25,6 +25,6 @@ Here's an ASCII diagram of the setup:
 
 Setup
 -----
-1. Install [https://boto.readthedocs.org/en/latest/getting_started.html#installing-boto](Boto)
-2. Install [http://www.squid-cache.org/Download/](Squid)
+1. Install [Boto](https://boto.readthedocs.org/en/latest/getting_started.html#installing-boto)
+2. Install [Squid](http://www.squid-cache.org/Download/)
 3. Configure your AWS credentials in ~/.aws/credentials
