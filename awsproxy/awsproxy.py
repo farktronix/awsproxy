@@ -34,138 +34,238 @@ ec2ImageNotRunning = 2
 ec2ImageNotFound = 3
 
 AWSProxyKey = "AWSProxy"
+AWSProxyName = "AWS Proxy"
+
+InstanceAMIID = "ami-864d84ee"
+InstanceType = "t2.micro"
 
 userData = "#!/bin/bash\
 sudo apt-get install tinyproxy"
+
+class AWSProxy:
+    def __init__(self):
+        self.ec2 = None
+        self.vpc = None
+        self.instance = None
+        self.vpcInstance = None
+        self.default_region = default_region
+        self.CIDR = '10.0.0.0/24'
+        self.proxyTag = AWSProxyKey + "-" + self.default_region
+        self.connect()
+        
+    def connect(self):
+        self.ec2 = boto.ec2.connect_to_region(self.default_region)
+        self.vpc = boto.vpc.connect_to_region(self.default_region)
+        instance = self.getEC2Instance()
+        
+    def addTags(self, botoItem):    
+        botoItem.add_tag("Name", AWSProxyName)
+        botoItem.add_tag(AWSProxyKey, self.proxyTag)
+
+###
+## Instance Variables
+### 
+    def instanceIP(self):
+        if self.instance is not None:
+            return self.instance.public_dns_name
+        return None
+    
+    def hostIP(self):
+        return "0.0.0.0"
 
 ###
 ## Finding Instances
 ### 
 
-def findProxyInstance(instances):
-    retval = None
-    if instances is not None:
-        for instance in instances:
-            if instance.tags.get(AWSProxyKey) is not None:
-                retval = instance
-                break
-    return retval
+    def findProxyInstance(self, instances):
+        retval = None
+        if instances is not None:
+            for instance in instances:
+                proxyTag = instance.tags.get(AWSProxyKey)
+                if proxyTag is not None and proxyTag == self.proxyTag:
+                    retval = instance
+                    break
+        return retval
     
-def findExistingEC2Instance(ec2):
-    return findProxyInstance(ec2.get_only_instances())
+    def findExistingEC2Instance(self):
+        return self.findProxyInstance(self.ec2.get_only_instances())
     
-def findExistingSecurityGroup(ec2):
-    return findProxyInstance(vpc.get_all_security_groups())
+    def findExistingSecurityGroup(self):
+        return self.findProxyInstance(self.vpc.get_all_security_groups())
     
-def findExistingInternetGateway(vpc):
-    return findProxyInstance(vpc.get_all_internet_gateways())
+    def findExistingInternetGateway(self):
+        return self.findProxyInstance(self.vpc.get_all_internet_gateways())
     
-def findExistingVPCInstance(vpc):
-    return findProxyInstance(vpc.get_all_vpcs())
+    def findExistingVPCInstance(self):
+        return self.findProxyInstance(self.vpc.get_all_vpcs())
     
-def findExistingSubnet(vpc):
-    return findProxyInstance(vpc.get_all_subnets())
+    def findExistingSubnet(self):
+        return self.self.findProxyInstance(self.vpc.get_all_subnets())
 
-def findExistingRouteTable(vpc):
-    return findProxyInstance(vpc.get_all_route_tables())
+    def findExistingRouteTable(self):
+        return self.findProxyInstance(self.vpc.get_all_route_tables())
 
-def findExistingNetworkACL(vpc):
-    return findProxyInstance(vpc.get_all_network_acls())
+    def findExistingNetworkACL(self):
+        return self.findProxyInstance(self.vpc.get_all_network_acls())
 
 ###
 ## Creating Instances
 ###
-def createVPCInstance(vpc):
-    pass
+    def findItemWithVPCID(self, items, vpc):
+        item = None
+        for i in items:
+            if i.vpc_id == vpc.id:
+                item = i
+                break
+        return item
     
+    def getSubnetForVPC(self, vpc):
+        return self.findItemWithVPCID(self, self.vpc.get_all_subnets(), vpc)
+            
+    def getNetworkACLForVPC(self, vpc):
+        return self.findItemWithVPCID(self, self.vpc.get_all_network_acls(), vpc)
+    
+    def getRouteTableForVPC(self, vpc):
+        return self.findItemWithVPCID(self, self.vpc.get_all_route_tables(), vpc)
+        
+    def getSecurityGroupForVPC(self, vpc):
+        return self.findItemWithVPCID(self, self.vpc.get_all_security_groups(), vpc)
+
+    def createVPCInstance(self):
+        print "Creating new VPC instance"
+        vpc = self.vpc.create_vpc(self.CIDR)
+        self.addTags(vpc)
+        
+        subnet = self.getSubnetForVPC(vpc)
+        if subnet is None:
+            subnet = self.vpc.create_subnet(vpc.id, self.CIDR)
+        self.addTags(subnet)
+        
+        networkACL = self.getNetworkACLForVPC(vpc)
+        if networkACL is None:
+            networkACL = self.vpc.create_network_acl(vpc.id)
+        
+        self.addTags(networkACL)
+        self.vpc.associate_network_acl(networkACL.id, subnet.id)
+        
+        igw = None
+        for gateway in self.vpc.get_all_internet_gateways():
+            if len(gateway.attachments) == 0:
+                igw = gateway
+                break
+        if igw is None:
+            igw = self.vpc.create_internet_gateway()
+        
+        self.addTags(igw)
+        self.vpc.attach_internet_gateway(igw.id, vpc.id)
+        
+        routeTable = self.getRouteTableForVPC(vpc)
+        if routeTable is None:
+            routeTable = self.vpc.create_route_table(vpc.id)
+
+        self.addTags(routeTable)
+        self.vpc.create_route(routeTable.id, "0.0.0.0/0", gateway_id=igw.id)
+        self.vpc.associate_route_table(routeTable.id, subnet.id)
+        
+        return vpc
+    
+    def createInstance(self):
+        interface = boto.ec2.networkinterface.NetworkInterfaceSpecification(subnet_id=self.getSubnetForVPC(self.getVPCInstance()).id,
+                                                                            groups=self.getSecurityGroupForVPC(self.getVPCInstance()).id,
+                                                                            associate_public_ip_address=True)
+        interfaces = boto.ec2.networkinterface.NetworkInterfaceCollection(interface)
 ###
 ## Updating Instances
 ###    
-def updateSecurityGroup(securityGroup):
-    # TODO: Add the current IP address to the security group
-    pass
+    def updateSecurityGroupForVPC(self, vpc):
+        sec = self.getSecurityGroupForVPC(vpc)
+        
+        if secGroup is not None:
+            # TODO: Remove all old authorized IPs
+            self.ec2.authorize_security_group(group_id=secGroup.id, ip_protocol='-1', from_port=None, to_port=None, cidr_ip=self.hostIP() + "/32")
     
 ###
 ## Fetching Instances
 ###
-def getSecurityGroupFromInstance(ec2, instance):
-    attributes = ec2.get_instance_attribute(instances[0].id, "groupSet")
-    securityGroupId = attributes.get("groupSet")[0].id
-    retval = None
-    for securityGroup in ec2.get_all_security_groups()
-        if securityGroup.id == securityGroupId
-            retval = securityGroup
-            break
-    return retval
+    def getSecurityGroupFromInstance(self, instance):
+        attributes = self.ec2.get_instance_attribute(instances[0].id, "groupSet")
+        securityGroupId = attributes.get("groupSet")[0].id
+        retval = None
+        for securityGroup in self.ec2.get_all_security_groups():
+            if securityGroup.id == securityGroupId:
+                retval = securityGroup
+                break
+        return retval
     
-def getVPCInstance():
-    vpc = boto.vpc.connect_to_region(default_region)
-    instance = findExistingVPCInstance(vpc)
-    if instance is None:
-        instance = createVPCInstance(vpc)
+    def getVPCInstance(self):
+        if self.vpcInstance is None:
+            self.vpcInstance = self.findExistingVPCInstance()
+            if self.vpcInstance is None:
+                self.vpcInstance = self.createVPCInstance()
+            else:
+                print "Found existing VPC instance"
+            
+        return self.vpcInstance
     
-    return instance
+    def getEC2Instance(self):
+        instance = self.findExistingEC2Instance()
     
-def getEC2Instance(ec2):
-    instance = findExistingEC2Instance(ec2)
-    
-    if instance is None:
-        # TODO: Create an instance
-        pass
+        if instance is None:
+            # TODO: Create an instance
+            pass
 
-    if instance is not None:
-        securityGroup = getSecurityGroupFromInstance(ec2, instance)
-        updateSecurityGroup(securityGroup)
+        if instance is not None:
+            securityGroup = self.getSecurityGroupFromInstance(instance)
+            if securityGroup is not None:
+                self.updateSecurityGroup(securityGroup)
     
-    return instance
+        return instance
 
 ###
 ## Starting Instances
 ###
 
-#returns:
-# ec2ImageWait if the image is transitioning between states. The state should be checked again in a couple seconds.
-# ec2ImageReady if the image is running and ready to be used
-# ec2ImageNotRunning if the image needs to be started
-def getInstanceState(ec2, instance):
-    if instance is None:
+    #returns:
+    # ec2ImageWait if the image is transitioning between states. The state should be checked again in a couple seconds.
+    # ec2ImageReady if the image is running and ready to be used
+    # ec2ImageNotRunning if the image needs to be started
+    def getInstanceState(self, instance):
+        if instance is None:
+            return ec2ImageNotFound
+        if (instance.state_code == ec2StatePending or instance.state_code == ec2StateShuttingDown or instance.state_code == ec2StateStopping):
+            return ec2ImageWait
+        if instance.state_code == ec2StateRunning:
+            return ec2ImageReady
         return ec2ImageNotFound
-    if (instance.state_code == ec2StatePending or instance.state_code == ec2StateShuttingDown or instance.state_code == ec2StateStopping):
-        return ec2ImageWait
-    if instance.state_code == ec2StateRunning:
-        return ec2ImageReady
-    return ec2ImageNotFound
 
-def startInstance(ec2, instance):
-    print "Found instance: "+str(instance)+", state is "+instance.state
-    waitTime = 0
-    didStart = False
-    while waitTime < 30:
-        status = getInstanceState(ec2, instance)
-        if status == ec2ImageReady:
-            break
-        elif status == ec2ImageNotRunning and not didStart:
-            print "Starting instance "+str(instance)
-            #ec2.start_instances(instance.id)
-            didStart = True
-        elif status == ec2ImageNotFound:
-            break;
-        time.sleep(1)
-        waitTime = waitTime + 1
-    if waitTime == 30:
-        print "Timed out waiting for instance "+str(instance)+" to start. Current state is "+instance.state
-        
-def startImageAndGetIP():
-    ip = None
-    ec2 = boto.ec2.connect_to_region(default_region)
-    instance = getEC2Instance(ec2)
+    def startInstance(self, instance):
+        print "Found instance: "+str(instance)+", state is "+instance.state
+        waitTime = 0
+        didStart = False
+        while waitTime < 30:
+            status = self.getInstanceState(instance)
+            if status == ec2ImageReady:
+                break
+            elif status == ec2ImageNotRunning and not didStart:
+                print "Starting instance "+str(instance)
+                #self.ec2.start_instances(instance.id)
+                didStart = True
+            elif status == ec2ImageNotFound:
+                break;
+            time.sleep(1)
+            waitTime = waitTime + 1
+        if waitTime == 30:
+            print "Timed out waiting for instance "+str(instance)+" to start. Current state is "+instance.state
     
-    if instance is not None:
-        startInstance(ec2, instance)
-        return instance.public_dns_name
+    def startImageAndGetIP(self):
+        instance = self.getEC2Instance()
 
-    return None
-    
-ip = startImageAndGetIP()
-if ip is not None:
-    print "Proxy IP is "+ip
+        if instance is not None:
+            startInstance(instance)
+            return instance.public_dns_name
+
+        return None
+
+awsproxy = AWSProxy()
+vpc = awsproxy.getVPCInstance()
+awsproxy.updateSecurityGroupForVPC(vpc)
