@@ -2,6 +2,9 @@
 
 import boto.ec2
 import boto.vpc
+from urllib import urlopen
+import re
+import collections
 
 ###
 ## User Configuration
@@ -42,6 +45,10 @@ InstanceType = "t2.micro"
 userData = "#!/bin/bash\
 sudo apt-get install tinyproxy"
 
+# Follow instruction at http://www.datastax.com/docs/1.0/install/install_ami
+# to define the cluster security group rules and client security group rules.
+SecurityGroupRule = collections.namedtuple("SecurityGroupRule", ["ip_protocol", "from_port", "to_port", "cidr_ip", "src_group_name"])
+
 class AWSProxy:
     def __init__(self):
         self.ec2 = None
@@ -70,8 +77,14 @@ class AWSProxy:
             return self.instance.public_dns_name
         return None
     
+    def getPublicIp(self):
+        data = str(urlopen('http://checkip.dyndns.com/').read())
+        # data = '<html><head><title>Current IP Check</title></head><body>Current IP Address: 65.96.168.198</body></html>\r\n'
+
+        return re.compile(r'Address: (\d+\.\d+\.\d+\.\d+)').search(data).group(1)
+            
     def hostIP(self):
-        return "0.0.0.0"
+        return self.getPublicIp()
 
 ###
 ## Finding Instances
@@ -120,16 +133,16 @@ class AWSProxy:
         return item
     
     def getSubnetForVPC(self, vpc):
-        return self.findItemWithVPCID(self, self.vpc.get_all_subnets(), vpc)
+        return self.findItemWithVPCID(self.vpc.get_all_subnets(), vpc)
             
     def getNetworkACLForVPC(self, vpc):
-        return self.findItemWithVPCID(self, self.vpc.get_all_network_acls(), vpc)
+        return self.findItemWithVPCID(self.vpc.get_all_network_acls(), vpc)
     
     def getRouteTableForVPC(self, vpc):
-        return self.findItemWithVPCID(self, self.vpc.get_all_route_tables(), vpc)
+        return self.findItemWithVPCID(self.vpc.get_all_route_tables(), vpc)
         
     def getSecurityGroupForVPC(self, vpc):
-        return self.findItemWithVPCID(self, self.vpc.get_all_security_groups(), vpc)
+        return self.findItemWithVPCID(self.vpc.get_all_security_groups(), vpc)
 
     def createVPCInstance(self):
         print "Creating new VPC instance"
@@ -175,14 +188,74 @@ class AWSProxy:
                                                                             associate_public_ip_address=True)
         interfaces = boto.ec2.networkinterface.NetworkInterfaceCollection(interface)
 ###
-## Updating Instances
+## Updating Security Groups
 ###    
+
+    # Thanks to https://gist.github.com/steder/1498451 for the following code
+    def modify_sg(self, group, rule, authorize=False, revoke=False):
+        src_group = None
+        if rule.src_group_name:
+            src_group = self.ec2.get_all_security_groups([rule.src_group_name,])[0]
+
+        if authorize and not revoke:
+            group.authorize(ip_protocol=rule.ip_protocol,
+                            from_port=rule.from_port,
+                            to_port=rule.to_port,
+                            cidr_ip=rule.cidr_ip,
+                            src_group=src_group)
+        elif not authorize and revoke:
+            group.revoke(ip_protocol=rule.ip_protocol,
+                         from_port=rule.from_port,
+                         to_port=rule.to_port,
+                         cidr_ip=rule.cidr_ip,
+                         src_group=src_group)
+
+
+    def authorizeGroupRule(self, group, rule):
+        """Authorize `rule` on `group`."""
+        return self.modify_sg(group, rule, authorize=True)
+
+
+    def revokeGroupRule(self, group, rule):
+        """Revoke `rule` on `group`."""
+        return self.modify_sg(group, rule, revoke=True)
+
+
+    def update_security_group(self, group, expected_rules):
+        current_rules = []
+        for rule in group.rules:
+            if not rule.grants[0].cidr_ip:
+                current_rule = SecurityGroupRule(rule.ip_protocol,
+                                  rule.from_port,
+                                  rule.to_port,
+                                  "0.0.0.0/0",
+                                  rule.grants[0].name)
+            else:
+                current_rule = SecurityGroupRule(rule.ip_protocol,
+                                  rule.from_port,
+                                  rule.to_port,
+                                  rule.grants[0].cidr_ip,
+                                  None)
+
+            if current_rule not in expected_rules:
+                self.revokeGroupRule(group, current_rule)
+            else:
+                current_rules.append(current_rule)
+
+        for rule in expected_rules:
+            if rule not in current_rules:
+                self.authorizeGroupRule(group, rule)
+    
     def updateSecurityGroupForVPC(self, vpc):
-        sec = self.getSecurityGroupForVPC(vpc)
+        secGroup = self.getSecurityGroupForVPC(vpc)
+        self.addTags(secGroup)
         
         if secGroup is not None:
-            # TODO: Remove all old authorized IPs
-            self.ec2.authorize_security_group(group_id=secGroup.id, ip_protocol='-1', from_port=None, to_port=None, cidr_ip=self.hostIP() + "/32")
+            rules = [
+                SecurityGroupRule('-1', None, None, self.hostIP() + "/32", None)
+            ]
+        
+            self.update_security_group(secGroup, rules)
     
 ###
 ## Fetching Instances
