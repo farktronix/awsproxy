@@ -5,6 +5,7 @@ import boto.vpc
 from urllib import urlopen
 import re
 import collections
+import logging
 
 ###
 ## User Configuration
@@ -51,6 +52,10 @@ SecurityGroupRule = collections.namedtuple("SecurityGroupRule", ["ip_protocol", 
 
 class AWSProxy:
     def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.logger.addHandler(logging.NullHandler())
+        self.logger.debug("AWSProxy is here to help")
+        
         self.ec2 = None
         self.vpc = None
         self.instance = None
@@ -58,12 +63,18 @@ class AWSProxy:
         self.default_region = default_region
         self.CIDR = '10.0.0.0/24'
         self.proxyTag = AWSProxyKey + "-" + self.default_region
-        self.connect()
+        self.connected = False
         
     def connect(self):
-        self.ec2 = boto.ec2.connect_to_region(self.default_region)
-        self.vpc = boto.vpc.connect_to_region(self.default_region)
-        instance = self.getEC2Instance()
+        if not self.connected:
+            self.logger.debug("Connecting to AWS region %s" % self.default_region)
+            self.ec2 = boto.ec2.connect_to_region(self.default_region)
+            self.vpc = boto.vpc.connect_to_region(self.default_region)
+            if self.ec2 is not None and self.vpc is not None:
+                self.logger.debug("Successfully connected to AWS in region %s" % self.default_region)
+                self.connected = True
+            else:
+                self.logger.error("Failed to connect to AWS in region %s" % self.default_region)
         
     def addTags(self, botoItem):    
         botoItem.add_tag("Name", AWSProxyName)
@@ -80,11 +91,13 @@ class AWSProxy:
     def getPublicIp(self):
         data = str(urlopen('http://checkip.dyndns.com/').read())
         # data = '<html><head><title>Current IP Check</title></head><body>Current IP Address: 65.96.168.198</body></html>\r\n'
-
         return re.compile(r'Address: (\d+\.\d+\.\d+\.\d+)').search(data).group(1)
             
     def hostIP(self):
-        return self.getPublicIp()
+        if self.ip is None:
+            self.ip = self.getPublicIp()
+            self.logger.debug("Current IP is %s" % self.ip)
+        return self.ip
 
 ###
 ## Finding Instances
@@ -145,7 +158,7 @@ class AWSProxy:
         return self.findItemWithVPCID(self.vpc.get_all_security_groups(), vpc)
 
     def createVPCInstance(self):
-        print "Creating new VPC instance"
+        self.logger.info("Creating new VPC instance")
         vpc = self.vpc.create_vpc(self.CIDR)
         self.addTags(vpc)
         
@@ -275,8 +288,7 @@ class AWSProxy:
             self.vpcInstance = self.findExistingVPCInstance()
             if self.vpcInstance is None:
                 self.vpcInstance = self.createVPCInstance()
-            else:
-                print "Found existing VPC instance"
+            self.logger.debug("Using VPC instance: %s" % self.vpcInstance)
             
         return self.vpcInstance
     
@@ -312,7 +324,7 @@ class AWSProxy:
         return ec2ImageNotFound
 
     def startInstance(self, instance):
-        print "Found instance: "+str(instance)+", state is "+instance.state
+        self.logger.debug("Found EC2 instance: "+str(instance)+", state is "+instance.state)
         waitTime = 0
         didStart = False
         while waitTime < 30:
@@ -320,7 +332,7 @@ class AWSProxy:
             if status == ec2ImageReady:
                 break
             elif status == ec2ImageNotRunning and not didStart:
-                print "Starting instance "+str(instance)
+                self.logger.info("Starting instance "+instance.id)
                 #self.ec2.start_instances(instance.id)
                 didStart = True
             elif status == ec2ImageNotFound:
@@ -328,9 +340,10 @@ class AWSProxy:
             time.sleep(1)
             waitTime = waitTime + 1
         if waitTime == 30:
-            print "Timed out waiting for instance "+str(instance)+" to start. Current state is "+instance.state
+            self.logger.error("Timed out waiting for instance "+str(instance)+" to start. Current state is "+instance.state)
     
     def startImageAndGetIP(self):
+        self.connect()
         instance = self.getEC2Instance()
 
         if instance is not None:
@@ -338,7 +351,3 @@ class AWSProxy:
             return instance.public_dns_name
 
         return None
-
-awsproxy = AWSProxy()
-vpc = awsproxy.getVPCInstance()
-awsproxy.updateSecurityGroupForVPC(vpc)
